@@ -1,0 +1,81 @@
+###############################################################################
+##### -------------------  frontend apps pipeline ----------------------- #####
+###############################################################################
+
+
+variables:
+  IMAGE_TAG: "${CI_COMMIT_SHORT_SHA}"
+  CI_REGISTRY: cr.yandex/crp6fd91rf3bhoqildrp
+
+
+stages:
+  - build
+  - deploy
+
+#--------------------------------------------------------------------------------
+
+
+.build_template:
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  stage: build
+  script:
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(echo -n "oauth:${CI_REGISTRY_AUTH}" | base64 -w 0)\"}}}" > /kaniko/.docker/config.json
+    - if [[ "$ENABLE_SED" == "true" ]]; then sed -i "s/branchName/${CI_COMMIT_REF_NAME}/g" $CI_PROJECT_DIR/$app/site/config.toml; fi
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/$app/Dockerfile --destination $CI_REGISTRY/$app:$IMAGE_TAG;
+  tags:
+    - k8s
+
+build_app:
+  extends: .build_template
+  variables:
+    app: app
+    ENABLE_SED: "false"
+  only:
+    refs:
+      - branches
+      # - master
+    changes:
+      - app/**/*
+
+build_land:
+  extends: .build_template
+  variables:
+    app: land
+    ENABLE_SED: "true"
+  only:
+    refs:
+      - branches
+      # - master
+    changes:
+      - land/**/*
+
+
+#--------------------------------------------------------------------------------
+
+deploy_frontend_apps:
+  stage: deploy
+  image: cr.yandex/crp6fd91rf3bhoqildrp/deploy:0.3
+  script:
+    - git clone --branch main https://gitlab-ci-token:${CI_JOB_TOKEN}@gl.lifeisfile.com/eugene.k1387/charts.git ./charts
+    - |
+      applications="app land"
+      for app in $applications; do
+        echo "Deploying $app...";
+        helm upgrade --install "$app" "./charts/service-chart" \
+          --values "./charts/service-chart/values_$app.yaml" \
+          --namespace ${CI_COMMIT_REF_NAME} \
+          --create-namespace \
+          --set image.tag=${IMAGE_TAG} \
+          --wait;
+      done
+  environment:
+    name: $CI_COMMIT_REF_NAME
+    url: http://land.$CI_COMMIT_REF_NAME.jk-lab.ru
+  only:
+    refs:
+      - branches
+      # - master
+  tags:
+    - k8s
